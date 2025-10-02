@@ -49,7 +49,7 @@ resource "azurerm_kubernetes_cluster" "aks" {
 
   # Enable Azure RBAC for Kubernetes authorization
   azure_active_directory_role_based_access_control {
-    managed = true
+   # managed = true
     azure_rbac_enabled = true
   }
 }
