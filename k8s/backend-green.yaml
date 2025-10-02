@@ -1,0 +1,30 @@
+# k8s/backend-green.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-api-green
+  labels:
+    app: backend-api
+    color: green
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend-api
+      color: green
+  template:
+    metadata:
+      labels:
+        app: backend-api
+        color: green
+    spec:
+      containers:
+      - name: backend-api
+        image: <IMAGE_TAG_BACKEND> # Pipeline injects: acr/backend:v2.0.0
+        ports:
+        - containerPort: 3000
+        env:
+        - name: SERVICE_COLOR
+          value: "GREEN"
+        - name: APP_VERSION
+          value: "v2.0.0" # New version

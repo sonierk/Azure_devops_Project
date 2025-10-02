@@ -1,0 +1,15 @@
+# k8s/service-backend.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-api-service
+spec:
+  type: ClusterIP # Only accessible internally
+  ports:
+  - port: 80
+    targetPort: 3000
+    protocol: TCP
+  # This selector is the single point of traffic control for Blue/Green
+  selector:
+    app: backend-api
+    color: blue # Initial state: directing traffic to the 'blue' deployment

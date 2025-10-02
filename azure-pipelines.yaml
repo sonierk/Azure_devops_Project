@@ -1,0 +1,169 @@
+trigger:
+- main
+
+variables:
+  - group: Terraform_Outputs # Contains aks_cluster_name, acr_login_server, etc.
+  - name: azureSubscription
+    value: 'Azure-Service-Connection'
+  - name: backendImage
+    value: 'backend-api'
+  - name: frontendImage
+    value: 'frontend-app'
+  - name: appVersion
+    value: 'v2.0.0-$(Build.BuildId)' # New version tag
+
+stages:
+# -----------------------------------------------------------------------------------
+# Stage 1: Build & Push Services
+# -----------------------------------------------------------------------------------
+- stage: Build
+  displayName: Build and Push Images
+  jobs:
+  - job: BuildAndPush
+    displayName: Build Microservices
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    # Build and Push BACKEND
+    - task: Docker@2
+      displayName: Build and Push Backend Image
+      inputs:
+        containerRegistry: '$(acr_login_server)'
+        repository: '$(backendImage)'
+        command: 'buildAndPush'
+        Dockerfile: 'src/backend/Dockerfile'
+        tags: '$(appVersion)'
+        buildArguments: 'APP_VERSION=$(appVersion)'
+
+    # Build and Push FRONTEND
+    - task: Docker@2
+      displayName: Build and Push Frontend Image
+      inputs:
+        containerRegistry: '$(acr_login_server)'
+        repository: '$(frontendImage)'
+        command: 'buildAndPush'
+        Dockerfile: 'src/frontend/Dockerfile'
+        tags: '$(appVersion)'
+        buildArguments: 'APP_VERSION=$(appVersion)'
+
+# -----------------------------------------------------------------------------------
+# Stage 2: Initial Setup (DB and Frontend are static)
+# -----------------------------------------------------------------------------------
+- stage: Initial_Deployment
+  displayName: Setup DB and Static Frontend
+  dependsOn: Build
+  jobs:
+  - deployment: Setup
+    displayName: Deploy DB and Frontend
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: 'AKS-PROD-ENV'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureCLI@2
+            displayName: Get AKS Credentials
+            inputs:
+              azureSubscription: '$(azureSubscription)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az aks get-credentials --resource-group $(resource_group_name) --name $(aks_cluster_name) --overwrite-existing
+                
+          # 1. Deploy MongoDB StatefulSet (if not already running)
+          - task: Kubernetes@1
+            displayName: Apply MongoDB StatefulSet
+            inputs:
+              connectionType: 'None'
+              command: 'apply'
+              arguments: '-f k8s/db-statefulset.yaml'
+
+          # 2. Deploy Initial Backend (Blue) and Service
+          - task: Kubernetes@1
+            displayName: Deploy Backend (Blue) and Service (Initial)
+            inputs:
+              connectionType: 'None'
+              command: 'apply'
+              arguments: '-f k8s/backend-blue.yaml -f k8s/service-backend.yaml'
+              value: |
+                image: $(acr_login_server)/$(backendImage):$(appVersion)
+
+          # 3. Deploy Frontend Deployment and Load Balancer Service
+          - task: Kubernetes@1
+            displayName: Deploy Frontend and LoadBalancer
+            inputs:
+              connectionType: 'None'
+              command: 'apply'
+              arguments: '-f k8s/frontend-deployment.yaml -f k8s/service-frontend.yaml'
+              value: |
+                image: $(acr_login_server)/$(frontendImage):$(appVersion)
+                
+# -----------------------------------------------------------------------------------
+# Stage 3: Blue/Green Swap (Backend only)
+# -----------------------------------------------------------------------------------
+- stage: BlueGreen_Swap
+  displayName: Blue/Green Backend Swap
+  dependsOn: Initial_Deployment
+  jobs:
+  - deployment: SwapBackend
+    displayName: Deploy Green and Promote
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: 'AKS-PROD-ENV'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureCLI@2
+            displayName: Get AKS Credentials
+            inputs:
+              azureSubscription: '$(azureSubscription)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az aks get-credentials --resource-group $(resource_group_name) --name $(aks_cluster_name) --overwrite-existing
+
+          # 1. Deploy the new (Green) Backend version
+          - task: Kubernetes@1
+            displayName: Deploy Backend (Green) - New Version
+            inputs:
+              connectionType: 'None'
+              command: 'apply'
+              arguments: '-f k8s/backend-green.yaml'
+              value: |
+                image: $(acr_login_server)/$(backendImage):$(appVersion)
+                
+          # 2. Wait and Validate Green Environment (Pre-Swap)
+          - task: Bash@3
+            displayName: Pre-Swap Validation of Green
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo "Running smoke tests against the 'green' pods..."
+                # Use kubectl to check logs or status of the green pods before the swap
+                kubectl get pods -l color=green
+
+          # 3. Manual Approval Gate
+          - task: ManualValidation@0
+            timeoutInMinutes: 1440
+            displayName: "Approve Traffic Switch to Green Backend"
+
+          # 4. SWAP: Patch the backend service selector from 'blue' to 'green'
+          - task: AzureCLI@2
+            displayName: Switch Backend Service to Green
+            inputs:
+              azureSubscription: '$(azureSubscription)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                kubectl patch svc backend-api-service -p '{"spec":{"selector":{"color":"green"}}}'
+                echo "Traffic successfully switched to GREEN Backend."
+
+          # 5. Cleanup Old Environment
+          - task: Kubernetes@1
+            displayName: Delete Old (Blue) Backend Deployment
+            inputs:
+              connectionType: 'None'
+              command: 'delete'
+              arguments: 'deployment backend-api-blue'
