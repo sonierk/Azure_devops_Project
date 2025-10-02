@@ -1,5 +1,12 @@
+#
+# REQUIRED: Provider Configuration Block for AzureRM 3.x+
+# This explicitly configures the provider and satisfies the 'features {}' requirement.
+provider "azurerm" {
+  features {}
+}
+
 # Define Azure Provider and Terraform Remote State
-# NOTE: Replace 'tfstateuniqueid' with your actual, globally unique storage account name
+# NOTE: Replace 'tfstateyouruniqueid' with your actual, globally unique storage account name
 terraform {
   required_providers {
     azurerm = {
@@ -47,15 +54,14 @@ resource "azurerm_kubernetes_cluster" "aks" {
     type = "SystemAssigned" # Use System Assigned Identity for the cluster control plane
   }
 
-  # Enable Azure RBAC for Kubernetes authorization
-  azure_active_directory_role_based_access_control {
-   # managed = true
-    azure_rbac_enabled = true
-  }
+  # The explicit 'azure_active_directory_role_based_access_control' block was removed.
+  # AKS-managed AAD integration is the default behavior when this block is omitted,
+  # or you can use the 'role_based_access_control' block below if only Kubernetes RBAC is desired.
 }
 
 # 4. Grant AKS Kubelet Identity access to ACR (IAM Role Assignment)
 # This allows the AKS nodes to pull Docker images from the ACR securely.
+# NOTE: This requires the Terraform execution identity to have User Access Administrator/Owner role.
 resource "azurerm_role_assignment" "acr_pull_role" {
   # The principal is the Kubelet Managed Identity
   principal_id         = azurerm_kubernetes_cluster.aks.kubelet_identity[0].object_id
@@ -76,12 +82,32 @@ resource "azurerm_key_vault" "akv" {
   soft_delete_retention_days = 7
 }
 
+# 6. Key Vault Access Policy for Terraform Executor (Fixes 403 Secret Error)
+# Grants the user/service principal running Terraform permission to manage secrets.
+resource "azurerm_key_vault_access_policy" "current_user_secret_policy" {
+  key_vault_id = azurerm_key_vault.akv.id
+  tenant_id    = data.azurerm_client_config.current.tenant_id
+  object_id    = data.azurerm_client_config.current.object_id # The identity running Terraform
+
+  secret_permissions = [
+    "Get",
+    "List",
+    "Set",
+    "Delete",
+    "Recover",
+    "Backup",
+    "Restore",
+    "Purge",
+  ]
+}
+
+# 7. Key Vault Secret (Now depends on the access policy)
 resource "azurerm_key_vault_secret" "app_version_secret" {
   name         = "AppVersion"
   value        = "v1.0.0-initial" # Initial version used by the CI/CD pipeline
   key_vault_id = azurerm_key_vault.akv.id
-
-   # Ensure the policy is created before attempting to manage the secret
+  
+  # Ensure the policy is created before attempting to manage the secret
   depends_on = [
     azurerm_key_vault_access_policy.current_user_secret_policy
   ]
