@@ -80,4 +80,9 @@ resource "azurerm_key_vault_secret" "app_version_secret" {
   name         = "AppVersion"
   value        = "v1.0.0-initial" # Initial version used by the CI/CD pipeline
   key_vault_id = azurerm_key_vault.akv.id
+
+   # Ensure the policy is created before attempting to manage the secret
+  depends_on = [
+    azurerm_key_vault_access_policy.current_user_secret_policy
+  ]
 }
